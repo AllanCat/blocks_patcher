@@ -10,7 +10,7 @@ project(
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_DEBUG_POSTFIX "")
 
-add_executable(32 
+add_library(32 SHARED
     main.cpp
 )
 target_compile_features(32 PUBLIC cxx_std_23)
