@@ -70,6 +70,7 @@ std::unordered_map<std::string, std::uintptr_t> g_surface_hooks{};
 std::uint32_t g_width = ::GetSystemMetrics(SM_CXSCREEN);
 std::uint32_t g_height = ::GetSystemMetrics(SM_CYSCREEN);
 
+// simple log function
 template <class... Args>
 void log(std::string_view msg, Args &&...args)
 {
@@ -95,21 +96,23 @@ std::string fuload_to_string(std::uint32_t fuload)
     return flags_to_string(fuload_map, fuload);
 }
 
+// patch out an address with another, useful for IAT hooking but can be abused for other patching needs
 std::uintptr_t hook(std::uintptr_t iat_addr, std::uintptr_t hook_addr)
 {
-    // make iat_addr RW
+    // make hook location writable
     ::DWORD old_protect;
     assert(
         ::VirtualProtect(reinterpret_cast<void *>(iat_addr), sizeof(std::uintptr_t), PAGE_READWRITE, &old_protect) ==
         TRUE);
 
+    // save off original address
     std::uintptr_t original_addr{};
     std::memcpy(&original_addr, reinterpret_cast<void *>(iat_addr), sizeof(std::uintptr_t));
 
-    // write hook_addr to iat_addr
+    // overwrite
     std::memcpy(reinterpret_cast<void *>(iat_addr), &hook_addr, sizeof(std::uintptr_t));
 
-    // restore iat_addr's original protection
+    // restore original protection
     assert(
         ::VirtualProtect(reinterpret_cast<void *>(iat_addr), sizeof(std::uintptr_t), old_protect, &old_protect) ==
         TRUE);
@@ -118,6 +121,8 @@ std::uintptr_t hook(std::uintptr_t iat_addr, std::uintptr_t hook_addr)
 
     return original_addr;
 }
+
+// anything named *_hook is a hook of a real function
 
 __declspec(dllexport) HWND __stdcall CreateWindowExA_hook(
     DWORD dwExStyle,
@@ -295,6 +300,9 @@ __declspec(dllexport) HRESULT __stdcall Flip_hook(void *that, LPDIRECTDRAWSURFAC
 {
     log("Flip {} {} {}", that, reinterpret_cast<void *>(unnamedParam1), unnamedParam2);
 
+    // Flip() would internally manage the buffers for us on full screen but not in windowed mode
+    // simulate that by blitting the back buffer to the screen
+
     const auto res =
         reinterpret_cast<HRESULT(__stdcall *)(void *, LPRECT, LPDIRECTDRAWSURFACE7, LPRECT, DWORD, LPDDBLTFX)>(
             g_surface_hooks["Blt"])(that, nullptr, g_back_buffer_surface, nullptr, DDBLT_WAIT, nullptr);
@@ -302,9 +310,6 @@ __declspec(dllexport) HRESULT __stdcall Flip_hook(void *that, LPDIRECTDRAWSURFAC
     log("\tFlip(Blt) returned {}", res);
 
     return res;
-
-    // return reinterpret_cast<HRESULT(__stdcall *)(void *, LPDIRECTDRAWSURFACE7, DWORD)>(
-    //     g_surface_hooks["Flip"])(that, unnamedParam1, unnamedParam2);
 }
 
 __declspec(dllexport) HRESULT __stdcall Lock_hook(
@@ -351,9 +356,17 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
         unnamedParam1->dwFlags,
         ddcaps_to_string(unnamedParam1->ddsCaps.dwCaps));
 
+    // this function is called twice, once to create a primary surface and once to create an image surface
+    // the image surface is simple, the game simply copies the resource BITMAP to that which is a sprite map and then
+    // blits part of that to the other buffer
+    // the primary buffer assumes it's running in fullscreen and that flip will automatically handle the double
+    // buffering when we make it windowed we need to create and manage two buffers ourselves
+
+    // sanity check i understand how the code works
     static int count{};
     assert(count++ < 2);
 
+    // if this is the call for the full screen buffer then create a normal primary buffer
     if (unnamedParam1->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE)
     {
         auto new_unnamed_param1 = *unnamedParam1;
@@ -372,10 +385,15 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
 
         g_primary_surface = *unnamedParam2;
 
+        // constrain rendering to window, otherwise it'll still write to the whole screen
         LPDIRECTDRAWCLIPPER clipper{};
         g_ddraw->CreateClipper(0, &clipper, nullptr);
         clipper->SetHWnd(0, g_window);
         g_primary_surface->SetClipper(clipper);
+
+        // direct draw objects are COM objects, so the first thing on the returned pointer is a vtable pointer
+        // this makes it easy to hook
+        // we also save off the original functions
 
         const auto original_get_attached_surface = hook(
             reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_primary_surface)) + 0x30,
@@ -414,6 +432,7 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
 
         log("PRIMARY SURFACE {}", reinterpret_cast<void *>(g_primary_surface));
 
+        // also create a back buffer for double buffering
         {
             DDSURFACEDESC2 new_unnamed_param1{
                 .dwSize = 0x6c,
@@ -433,6 +452,8 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
                     g_ddraw_hooks["CreateSurface"])(that, &new_unnamed_param1, unnamedParam2, unnamedParam3);
 
             g_back_buffer_surface = *unnamedParam2;
+
+            // apply COM hooks
 
             const auto original_get_attached_surface = hook(
                 reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x30,
@@ -463,8 +484,6 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
                 reinterpret_cast<std::uintptr_t>(Unlock_hook));
 
             log("BACK BUFFER SURFACE {}", reinterpret_cast<void *>(g_back_buffer_surface));
-
-            // hook(0x004baf38, reinterpret_cast<std::uintptr_t>(g_back_buffer_surface));
         }
 
         *unnamedParam2 = g_primary_surface;
@@ -473,6 +492,8 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
     }
     else
     {
+        // image buffer
+
         DDSURFACEDESC2 new_unnamed_param1{
             .dwSize = 0x6c,
             .dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
@@ -491,6 +512,8 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
                 g_ddraw_hooks["CreateSurface"])(that, &new_unnamed_param1, unnamedParam2, unnamedParam3);
 
         g_image_surface = *unnamedParam2;
+
+        // apply COM hooks
 
         const auto original_get_attached_surface = hook(
             reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x30,
@@ -595,6 +618,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     if (fdwReason == DLL_PROCESS_ATTACH)
     {
+        // for some reason the game tries to write to the resource section which is loaded as read only - so fix that
         DWORD old_protect{};
         assert(
             ::VirtualProtect(reinterpret_cast<void *>(0x004BE000), 0x0002F000, PAGE_EXECUTE_READWRITE, &old_protect) ==
@@ -605,11 +629,15 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
         log("\nlibrary loaded");
 
+        // hook various win32 functions
         hook(0x419120, reinterpret_cast<std::uintptr_t>(CreateWindowExA_hook));
         hook(0x419124, reinterpret_cast<std::uintptr_t>(GetSystemMetrics_hook));
         hook(0x419000, reinterpret_cast<std::uintptr_t>(DirectDrawCreate_hook));
         hook(0x41910C, reinterpret_cast<std::uintptr_t>(LoadImageA_hook));
 
+        // deep in the bowels of LoadImageA it calls a function which compares the size of the internal image resource
+        // for some reason that always fails, despite the image being legit
+        // so patch out that function to just return (eax is non-zero so will pass follow on check)
         std::uintptr_t rets = 0xc3c3c3c3;
         hook(0x76E29D7F, rets);
     }
