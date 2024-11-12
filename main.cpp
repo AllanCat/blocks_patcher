@@ -47,13 +47,28 @@ std::vector<std::tuple<std::uint32_t, std::string>> ddcaps_map{
     {DDSCAPS_WRITEONLY, "DDSCAPS_WRITEONLY"},
     {DDSCAPS_ZBUFFER, "DDSCAPS_ZBUFFER"}};
 
+std::vector<std::tuple<std::uint32_t, std::string>> fuload_map{
+    {LR_CREATEDIBSECTION, "LR_CREATEDIBSECTION"},
+    {LR_DEFAULTCOLOR, "LR_DEFAULTCOLOR"},
+    {LR_DEFAULTSIZE, "LR_DEFAULTSIZE"},
+    {LR_LOADFROMFILE, "LR_LOADFROMFILE"},
+    {LR_LOADMAP3DCOLORS, "LR_LOADMAP3DCOLORS"},
+    {LR_LOADTRANSPARENT, "LR_LOADTRANSPARENT"},
+    {LR_MONOCHROME, "LR_MONOCHROME"},
+    {LR_SHARED, "LR_SHARED"},
+    {LR_VGACOLOR, "LR_VGACOLOR"}};
+
 std::ofstream g_log{};
 LPDIRECTDRAW g_ddraw{};
 HWND g_window{};
 LPDIRECTDRAWSURFACE7 g_primary_surface{};
-LPDIRECTDRAWSURFACE7 g_secondary_surface{};
+LPDIRECTDRAWSURFACE7 g_back_buffer_surface{};
+LPDIRECTDRAWSURFACE7 g_image_surface{};
 std::unordered_map<std::string, std::uintptr_t> g_ddraw_hooks{};
 std::unordered_map<std::string, std::uintptr_t> g_surface_hooks{};
+
+std::uint32_t g_width = ::GetSystemMetrics(SM_CXSCREEN);
+std::uint32_t g_height = ::GetSystemMetrics(SM_CYSCREEN);
 
 template <class... Args>
 void log(std::string_view msg, Args &&...args)
@@ -61,13 +76,23 @@ void log(std::string_view msg, Args &&...args)
     g_log << std::vformat(msg, std::make_format_args(args...)) << std::endl;
 }
 
+std::string flags_to_string(const auto &map, std::uint32_t flag)
+{
+    return map |                                                                         //
+           std::views::filter([flag](const auto &e) { return flag & std::get<0>(e); }) | //
+           std::views::transform([](const auto &e) { return std::get<1>(e); }) |         //
+           std::views::join_with('|') |                                                  //
+           std::ranges::to<std::string>();
+}
+
 std::string ddcaps_to_string(std::uint32_t ddcaps)
 {
-    return ddcaps_map |                                                                      //
-           std::views::filter([ddcaps](const auto &e) { return ddcaps & std::get<0>(e); }) | //
-           std::views::transform([](const auto &e) { return std::get<1>(e); }) |             //
-           std::views::join_with('|') |                                                      //
-           std::ranges::to<std::string>();
+    return flags_to_string(ddcaps_map, ddcaps);
+}
+
+std::string fuload_to_string(std::uint32_t fuload)
+{
+    return flags_to_string(fuload_map, fuload);
 }
 
 std::uintptr_t hook(std::uintptr_t iat_addr, std::uintptr_t hook_addr)
@@ -199,7 +224,7 @@ __declspec(dllexport) HRESULT __stdcall GetAttachedSurface_hook(
         ddcaps_to_string(unnamedParam1->dwCaps),
         reinterpret_cast<void *>(unnamedParam2));
 
-    *unnamedParam2 = g_secondary_surface;
+    *unnamedParam2 = g_back_buffer_surface;
     return DD_OK;
 
     // return reinterpret_cast<HRESULT(__stdcall *)(void *, LPDDSCAPS2, LPDIRECTDRAWSURFACE7 *)>(
@@ -270,8 +295,41 @@ __declspec(dllexport) HRESULT __stdcall Flip_hook(void *that, LPDIRECTDRAWSURFAC
 {
     log("Flip {} {} {}", that, reinterpret_cast<void *>(unnamedParam1), unnamedParam2);
 
-    return reinterpret_cast<HRESULT(__stdcall *)(void *, LPDIRECTDRAWSURFACE7, DWORD)>(
-        g_ddraw_hooks["Flip"])(that, unnamedParam1, unnamedParam2);
+    const auto res =
+        reinterpret_cast<HRESULT(__stdcall *)(void *, LPRECT, LPDIRECTDRAWSURFACE7, LPRECT, DWORD, LPDDBLTFX)>(
+            g_surface_hooks["Blt"])(that, nullptr, g_back_buffer_surface, nullptr, DDBLT_WAIT, nullptr);
+
+    log("\tFlip(Blt) returned {}", res);
+
+    return res;
+
+    // return reinterpret_cast<HRESULT(__stdcall *)(void *, LPDIRECTDRAWSURFACE7, DWORD)>(
+    //     g_surface_hooks["Flip"])(that, unnamedParam1, unnamedParam2);
+}
+
+__declspec(dllexport) HRESULT __stdcall Lock_hook(
+    void *that,
+    LPRECT unnamedParam1,
+    LPDDSURFACEDESC2 unnamedParam2,
+    DWORD unnamedParam3,
+    HANDLE unnamedParam4)
+{
+    log("Lock {} {} {} {} {}",
+        reinterpret_cast<void *>(that),
+        reinterpret_cast<void *>(unnamedParam1),
+        reinterpret_cast<void *>(unnamedParam2),
+        unnamedParam3,
+        reinterpret_cast<void *>(unnamedParam4));
+
+    return reinterpret_cast<HRESULT(__stdcall *)(void *, LPRECT, LPDDSURFACEDESC2, DWORD, HANDLE)>(
+        g_surface_hooks["Lock"])(that, unnamedParam1, unnamedParam2, unnamedParam3, unnamedParam4);
+}
+
+__declspec(dllexport) HRESULT __stdcall Unlock_hook(void *that, LPRECT unnamedParam1)
+{
+    log("Unlock {} {}", reinterpret_cast<void *>(that), reinterpret_cast<void *>(unnamedParam1));
+
+    return reinterpret_cast<HRESULT(__stdcall *)(void *, LPRECT)>(g_surface_hooks["Unlock"])(that, unnamedParam1);
 }
 
 __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
@@ -342,9 +400,74 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
         const auto original_flip = hook(
             reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_primary_surface)) + 0x2c,
             reinterpret_cast<std::uintptr_t>(Flip_hook));
-        g_ddraw_hooks["Flip"] = original_flip;
+        g_surface_hooks["Flip"] = original_flip;
+
+        const auto original_lock = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_primary_surface)) + 0x64,
+            reinterpret_cast<std::uintptr_t>(Lock_hook));
+        g_surface_hooks["Lock"] = original_lock;
+
+        const auto original_unlock = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_primary_surface)) + 0x80,
+            reinterpret_cast<std::uintptr_t>(Unlock_hook));
+        g_surface_hooks["Unlock"] = original_unlock;
 
         log("PRIMARY SURFACE {}", reinterpret_cast<void *>(g_primary_surface));
+
+        {
+            DDSURFACEDESC2 new_unnamed_param1{
+                .dwSize = 0x6c,
+                .dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+                .dwHeight = g_height,
+                .dwWidth = g_width,
+                .ddsCaps = {.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY}};
+
+            log("new DDSURFACEDESC2: {} {} {} {}",
+                new_unnamed_param1.dwWidth,
+                new_unnamed_param1.dwHeight,
+                new_unnamed_param1.dwFlags,
+                ddcaps_to_string(new_unnamed_param1.ddsCaps.dwCaps));
+
+            const auto res =
+                reinterpret_cast<HRESULT(__stdcall *)(void *, LPDDSURFACEDESC2, LPDIRECTDRAWSURFACE7 *, IUnknown *)>(
+                    g_ddraw_hooks["CreateSurface"])(that, &new_unnamed_param1, unnamedParam2, unnamedParam3);
+
+            g_back_buffer_surface = *unnamedParam2;
+
+            const auto original_get_attached_surface = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x30,
+                reinterpret_cast<std::uintptr_t>(GetAttachedSurface_hook));
+
+            const auto original_blt = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x14,
+                reinterpret_cast<std::uintptr_t>(Blt_hook));
+
+            const auto original_blt_batch = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x18,
+                reinterpret_cast<std::uintptr_t>(BltBatch_hook));
+
+            const auto original_blt_fast = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x1c,
+                reinterpret_cast<std::uintptr_t>(BltFast_hook));
+
+            const auto original_flip = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x2c,
+                reinterpret_cast<std::uintptr_t>(Flip_hook));
+
+            const auto original_lock = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x64,
+                reinterpret_cast<std::uintptr_t>(Lock_hook));
+
+            const auto original_unlock = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x80,
+                reinterpret_cast<std::uintptr_t>(Unlock_hook));
+
+            log("BACK BUFFER SURFACE {}", reinterpret_cast<void *>(g_back_buffer_surface));
+
+            // hook(0x004baf38, reinterpret_cast<std::uintptr_t>(g_back_buffer_surface));
+        }
+
+        *unnamedParam2 = g_primary_surface;
 
         return res;
     }
@@ -353,8 +476,8 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
         DDSURFACEDESC2 new_unnamed_param1{
             .dwSize = 0x6c,
             .dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
-            .dwHeight = 480,
-            .dwWidth = 640,
+            .dwHeight = g_height,
+            .dwWidth = g_width,
             .ddsCaps = {.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY}};
 
         log("new DDSURFACEDESC2: {} {} {} {}",
@@ -367,31 +490,37 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
             reinterpret_cast<HRESULT(__stdcall *)(void *, LPDDSURFACEDESC2, LPDIRECTDRAWSURFACE7 *, IUnknown *)>(
                 g_ddraw_hooks["CreateSurface"])(that, &new_unnamed_param1, unnamedParam2, unnamedParam3);
 
-        g_secondary_surface = *unnamedParam2;
+        g_image_surface = *unnamedParam2;
 
         const auto original_get_attached_surface = hook(
-            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_secondary_surface)) + 0x30,
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x30,
             reinterpret_cast<std::uintptr_t>(GetAttachedSurface_hook));
 
         const auto original_blt = hook(
-            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_secondary_surface)) + 0x14,
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x14,
             reinterpret_cast<std::uintptr_t>(Blt_hook));
 
         const auto original_blt_batch = hook(
-            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_secondary_surface)) + 0x18,
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x18,
             reinterpret_cast<std::uintptr_t>(BltBatch_hook));
 
         const auto original_blt_fast = hook(
-            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_secondary_surface)) + 0x1c,
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x1c,
             reinterpret_cast<std::uintptr_t>(BltFast_hook));
 
         const auto original_flip = hook(
-            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_secondary_surface)) + 0x2c,
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x2c,
             reinterpret_cast<std::uintptr_t>(Flip_hook));
 
-        log("SECONDARY SURFACE {}", reinterpret_cast<void *>(g_secondary_surface));
+        const auto original_lock = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x64,
+            reinterpret_cast<std::uintptr_t>(Lock_hook));
 
-        hook(0x004baf38, reinterpret_cast<std::uintptr_t>(g_secondary_surface));
+        const auto original_unlock = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x80,
+            reinterpret_cast<std::uintptr_t>(Unlock_hook));
+
+        log("IMAGE SURFACE {}", reinterpret_cast<void *>(g_image_surface));
 
         return res;
     }
@@ -427,6 +556,41 @@ __declspec(dllexport) HRESULT __stdcall DirectDrawCreate_hook(GUID *lpGUID, LPDI
     return result;
 }
 
+__declspec(dllexport) int __stdcall GetSystemMetrics_hook(int nIndex)
+{
+    log("GetSystemMetrics {} ", nIndex);
+
+    switch (nIndex)
+    {
+        case SM_CXSCREEN: return g_width;
+        case SM_CYSCREEN: return g_height;
+        default: return GetSystemMetrics(nIndex);
+    }
+}
+
+__declspec(dllexport) HANDLE __stdcall LoadImageA_hook(
+    HINSTANCE hInst,
+    LPCSTR name,
+    UINT type,
+    int cx,
+    int cy,
+    UINT fuLoad)
+{
+    log("LoadImageA {} {} {} {} {} {} ({:x})",
+        reinterpret_cast<void *>(hInst),
+        name,
+        type,
+        cx,
+        cy,
+        fuload_to_string(fuLoad),
+        fuLoad);
+
+    const auto res = LoadImageA(hInst, name, type, cx, cy, fuLoad);
+    log("\tLoadImageA returned {} ({})", res, ::GetLastError());
+
+    return res;
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     if (fdwReason == DLL_PROCESS_ATTACH)
@@ -442,7 +606,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         log("\nlibrary loaded");
 
         hook(0x419120, reinterpret_cast<std::uintptr_t>(CreateWindowExA_hook));
+        hook(0x419124, reinterpret_cast<std::uintptr_t>(GetSystemMetrics_hook));
         hook(0x419000, reinterpret_cast<std::uintptr_t>(DirectDrawCreate_hook));
+        hook(0x41910C, reinterpret_cast<std::uintptr_t>(LoadImageA_hook));
+
+        std::uintptr_t rets = 0xc3c3c3c3;
+        hook(0x76E29D7F, rets);
     }
 
     return TRUE;
