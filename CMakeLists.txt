@@ -15,4 +15,5 @@ add_library(32 SHARED
 )
 target_compile_features(32 PUBLIC cxx_std_23)
 target_link_options(32 PUBLIC /INCREMENTAL:NO)
+target_compile_options(32 PUBLIC /MTd)
 
