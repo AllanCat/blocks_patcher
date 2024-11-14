@@ -58,6 +58,18 @@ std::vector<std::tuple<std::uint32_t, std::string>> fuload_map{
     {LR_SHARED, "LR_SHARED"},
     {LR_VGACOLOR, "LR_VGACOLOR"}};
 
+std::vector<std::tuple<std::uint32_t, std::string>> palette_caps_maps{
+    {DDPCAPS_1BIT, "DDPCAPS_1BIT"},
+    {DDPCAPS_2BIT, "DDPCAPS_2BIT"},
+    {DDPCAPS_4BIT, "DDPCAPS_4BIT"},
+    {DDPCAPS_8BIT, "DDPCAPS_8BIT"},
+    {DDPCAPS_8BITENTRIES, "DDPCAPS_8BITENTRIES"},
+    {DDPCAPS_ALPHA, "DDPCAPS_ALPHA"},
+    {DDPCAPS_ALLOW256, "DDPCAPS_ALLOW256"},
+    {DDPCAPS_PRIMARYSURFACE, "DDPCAPS_PRIMARYSURFACE"},
+    {DDPCAPS_PRIMARYSURFACELEFT, "DDPCAPS_PRIMARYSURFACELEFT"},
+    {DDPCAPS_VSYNC, "DDPCAPS_VSYNC"}};
+
 std::ofstream g_log{};
 LPDIRECTDRAW g_ddraw{};
 HWND g_window{};
@@ -66,15 +78,20 @@ LPDIRECTDRAWSURFACE7 g_back_buffer_surface{};
 LPDIRECTDRAWSURFACE7 g_image_surface{};
 std::unordered_map<std::string, std::uintptr_t> g_ddraw_hooks{};
 std::unordered_map<std::string, std::uintptr_t> g_surface_hooks{};
+std::unordered_map<std::string, std::uintptr_t> g_palette_hooks{};
+
+PALETTEENTRY g_palette[256]{};
 
 std::uint32_t g_width = ::GetSystemMetrics(SM_CXSCREEN);
 std::uint32_t g_height = ::GetSystemMetrics(SM_CYSCREEN);
+std::vector<BYTE> g_image_pixels{};
 
 // simple log function
 template <class... Args>
 void log(std::string_view msg, Args &&...args)
 {
-    g_log << std::vformat(msg, std::make_format_args(args...)) << std::endl;
+    // uncomment to log to file
+    // g_log << std::vformat(msg, std::make_format_args(args...)) << std::endl;
 }
 
 std::string flags_to_string(const auto &map, std::uint32_t flag)
@@ -94,6 +111,11 @@ std::string ddcaps_to_string(std::uint32_t ddcaps)
 std::string fuload_to_string(std::uint32_t fuload)
 {
     return flags_to_string(fuload_map, fuload);
+}
+
+std::string palette_caps_to_string(std::uint32_t palette_caps)
+{
+    return flags_to_string(palette_caps_maps, palette_caps);
 }
 
 // patch out an address with another, useful for IAT hooking but can be abused for other patching needs
@@ -217,8 +239,6 @@ __declspec(dllexport) HRESULT __stdcall SetDisplayMode_hook(
     log("\tskipping");
 
     return DD_OK;
-    // return reinterpret_cast<HRESULT(__stdcall *)(void *, DWORD, DWORD, DWORD)>(
-    //     g_ddraw_hooks["SetDisplayMode"])(that, unnamedParam1, unnamedParam2, unnamedParam3);
 }
 
 __declspec(dllexport) HRESULT __stdcall GetAttachedSurface_hook(
@@ -233,9 +253,62 @@ __declspec(dllexport) HRESULT __stdcall GetAttachedSurface_hook(
 
     *unnamedParam2 = g_back_buffer_surface;
     return DD_OK;
+}
 
-    // return reinterpret_cast<HRESULT(__stdcall *)(void *, LPDDSCAPS2, LPDIRECTDRAWSURFACE7 *)>(
-    //     g_surface_hooks["GetAttachedSurface"])(that, unnamedParam1, unnamedParam2);
+__declspec(dllexport) HRESULT __stdcall SetEntries_hook(
+    void *that,
+    DWORD unnamedParam1,
+    DWORD unnamedParam2,
+    DWORD unnamedParam3,
+    LPPALETTEENTRY unnamedParam4)
+{
+    log("SetEntries {} {} {} {} {}",
+        reinterpret_cast<void *>(that),
+        unnamedParam1,
+        unnamedParam2,
+        unnamedParam3,
+        reinterpret_cast<void *>(unnamedParam4));
+
+    // save off a copy of the palette entries
+    std::memcpy(g_palette, unnamedParam4, sizeof(g_palette));
+
+    for (const auto &entry : g_palette)
+    {
+        log("\t{} {} {} {}", entry.peRed, entry.peGreen, entry.peBlue, entry.peFlags);
+    }
+
+    const auto res = reinterpret_cast<HRESULT(__stdcall *)(void *, DWORD, DWORD, DWORD, LPPALETTEENTRY)>(
+        g_palette_hooks["SetEntries"])(that, unnamedParam1, unnamedParam2, unnamedParam3, unnamedParam4);
+
+    log("\tSetEntries returned {}", res);
+    return res;
+}
+
+__declspec(dllexport) HRESULT __stdcall CreatePalette_hook(
+    void *that,
+    DWORD unnamedParam1,
+    LPPALETTEENTRY unnamedParam2,
+    LPDIRECTDRAWPALETTE *unnamedParam3,
+    IUnknown *unnamedParam4)
+{
+    log("CreatePalette {} {} {} {} {}",
+        reinterpret_cast<void *>(that),
+        unnamedParam1,
+        reinterpret_cast<void *>(unnamedParam2),
+        reinterpret_cast<void *>(unnamedParam3),
+        reinterpret_cast<void *>(unnamedParam4));
+
+    const auto res =
+        reinterpret_cast<HRESULT(__stdcall *)(void *, DWORD, LPPALETTEENTRY, LPDIRECTDRAWPALETTE *, IUnknown *)>(
+            g_ddraw_hooks["CreatePalette"])(that, unnamedParam1, unnamedParam2, unnamedParam3, unnamedParam4);
+
+    const auto original_set_entries = hook(
+        reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(*unnamedParam3)) + 0x18,
+        reinterpret_cast<std::uintptr_t>(SetEntries_hook));
+    g_palette_hooks["SetEntries"] = original_set_entries;
+
+    log("\tCreatePalette returned {}", res);
+    return res;
 }
 
 __declspec(dllexport) HRESULT __stdcall Blt_hook(
@@ -302,6 +375,50 @@ __declspec(dllexport) HRESULT __stdcall Flip_hook(void *that, LPDIRECTDRAWSURFAC
 {
     log("Flip {} {} {}", that, reinterpret_cast<void *>(unnamedParam1), unnamedParam2);
 
+    DDSURFACEDESC2 ddsd{};
+    ddsd.dwSize = sizeof(ddsd);
+
+    static auto once = false;
+
+    //  manually apply palette (once) to the loaded image as palett's don't work as expected in windows mode
+
+    if (!once)
+    {
+        once = true;
+        assert(g_image_surface->Lock(nullptr, &ddsd, DDLOCK_WAIT, nullptr) == DD_OK);
+
+        auto *pSurfaceMemory = static_cast<BYTE *>(ddsd.lpSurface);
+        const auto pitch = ddsd.lPitch;
+
+        log("pitch: {} width: {} height: {}", pitch, ddsd.dwWidth, ddsd.dwHeight);
+
+        for (auto y = 0; y < ddsd.dwHeight; ++y)
+        {
+            for (auto x = 0; x < ddsd.dwWidth; ++x)
+            {
+                auto *pRow = pSurfaceMemory + ((y * ddsd.dwWidth) + x) * 4;
+                auto paletteIndex = g_image_pixels[(ddsd.dwHeight - y - 1) * ddsd.dwWidth + x];
+
+                log("palette index: {}", paletteIndex);
+
+                auto colour = g_palette[paletteIndex];
+
+                pRow[0] = colour.peBlue;
+                pRow[1] = colour.peGreen;
+                pRow[2] = colour.peRed;
+                pRow[3] = 0;
+
+                // for some reason the bitmap image has magenta instead of a white background - so fix that
+                if (pRow[0] == 0xff && pRow[1] == 0 && pRow[2] == 0xff)
+                {
+                    pRow[1] = 0xff;
+                }
+            }
+        }
+
+        g_image_surface->Unlock(nullptr);
+    }
+
     // Flip() would internally manage the buffers for us on full screen but not in windowed mode
     // simulate that by blitting the back buffer to the screen
 
@@ -339,6 +456,17 @@ __declspec(dllexport) HRESULT __stdcall Unlock_hook(void *that, LPRECT unnamedPa
     return reinterpret_cast<HRESULT(__stdcall *)(void *, LPRECT)>(g_surface_hooks["Unlock"])(that, unnamedParam1);
 }
 
+__declspec(dllexport) HRESULT __stdcall SetPalette_hook(void *that, LPDIRECTDRAWPALETTE unnamedParam1)
+{
+    log("SetPalette {} {}", that, reinterpret_cast<void *>(unnamedParam1));
+
+    const auto res = reinterpret_cast<HRESULT(__stdcall *)(void *, LPDIRECTDRAWPALETTE)>(
+        g_surface_hooks["SetPalette"])(that, unnamedParam1);
+
+    log("\tSetPalette returned {}", res);
+    return res;
+}
+
 __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
     void *that,
     LPDDSURFACEDESC2 unnamedParam1,
@@ -374,6 +502,8 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
         auto new_unnamed_param1 = *unnamedParam1;
         new_unnamed_param1.dwFlags = DDSD_CAPS;
         new_unnamed_param1.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+        new_unnamed_param1.dwWidth = g_width;
+        new_unnamed_param1.dwHeight = g_height;
 
         log("new DDSURFACEDESC2: {} {} {} {}",
             new_unnamed_param1.dwWidth,
@@ -432,6 +562,11 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
             reinterpret_cast<std::uintptr_t>(Unlock_hook));
         g_surface_hooks["Unlock"] = original_unlock;
 
+        const auto original_set_palette = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_primary_surface)) + 0x7c,
+            reinterpret_cast<std::uintptr_t>(SetPalette_hook));
+        g_surface_hooks["SetPalette"] = original_set_palette;
+
         log("PRIMARY SURFACE {}", reinterpret_cast<void *>(g_primary_surface));
 
         // also create a back buffer for double buffering
@@ -485,6 +620,10 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
                 reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x80,
                 reinterpret_cast<std::uintptr_t>(Unlock_hook));
 
+            const auto original_set_palette = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x7c,
+                reinterpret_cast<std::uintptr_t>(SetPalette_hook));
+
             log("BACK BUFFER SURFACE {}", reinterpret_cast<void *>(g_back_buffer_surface));
         }
 
@@ -499,8 +638,8 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
         DDSURFACEDESC2 new_unnamed_param1{
             .dwSize = 0x6c,
             .dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
-            .dwHeight = g_height,
-            .dwWidth = g_width,
+            .dwHeight = unnamedParam1->dwHeight,
+            .dwWidth = unnamedParam1->dwWidth,
             .ddsCaps = {.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY}};
 
         log("new DDSURFACEDESC2: {} {} {} {}",
@@ -545,6 +684,10 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
             reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x80,
             reinterpret_cast<std::uintptr_t>(Unlock_hook));
 
+        const auto original_set_palette = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x7c,
+            reinterpret_cast<std::uintptr_t>(SetPalette_hook));
+
         log("IMAGE SURFACE {}", reinterpret_cast<void *>(g_image_surface));
 
         return res;
@@ -578,6 +721,11 @@ __declspec(dllexport) HRESULT __stdcall DirectDrawCreate_hook(GUID *lpGUID, LPDI
         reinterpret_cast<std::uintptr_t>(CreateSurface_hook));
     g_ddraw_hooks["CreateSurface"] = original_create_surface;
 
+    const auto original_create_palette = hook(
+        reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_ddraw)) + 0x14,
+        reinterpret_cast<std::uintptr_t>(CreatePalette_hook));
+    g_ddraw_hooks["CreatePalette"] = original_create_palette;
+
     return result;
 }
 
@@ -610,8 +758,34 @@ __declspec(dllexport) HANDLE __stdcall LoadImageA_hook(
         fuload_to_string(fuLoad),
         fuLoad);
 
-    const auto res = LoadImageA(hInst, name, type, cx, cy, fuLoad);
-    log("\tLoadImageA returned {} ({})", res, ::GetLastError());
+    const auto res = (HBITMAP)LoadImage(hInst, name, IMAGE_BITMAP, cx, cy, fuLoad);
+    HDC hdc = GetDC(nullptr);
+
+    BITMAP bmp{};
+    assert(GetObject((HBITMAP)res, sizeof(BITMAP), &bmp) != 0);
+
+    int width = bmp.bmWidth;
+    int height = bmp.bmHeight;
+    int bitCount = bmp.bmBitsPixel;
+
+    log("{} {} {} {} {} {} {} {} {}",
+        reinterpret_cast<void *>(res),
+        width,
+        height,
+        bitCount,
+        bmp.bmPlanes,
+        bmp.bmWidthBytes,
+        bmp.bmType,
+        bmp.bmHeight,
+        bmp.bmWidth);
+
+    int bytesPerPixel = bitCount / 8;
+    int dataSize = width * height * bytesPerPixel;
+    log("dataSize: {}", dataSize);
+
+    // save off a copy of the original bitmap data so we can do a palette conversion later
+    g_image_pixels.resize(dataSize * 10);
+    std::memcpy(g_image_pixels.data(), bmp.bmBits, dataSize);
 
     return res;
 }
