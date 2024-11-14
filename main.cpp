@@ -758,7 +758,9 @@ __declspec(dllexport) HANDLE __stdcall LoadImageA_hook(
         fuload_to_string(fuLoad),
         fuLoad);
 
-    const auto res = (HBITMAP)LoadImage(nullptr, "BITMAP.bmp", IMAGE_BITMAP, cx, cy, fuLoad | LR_LOADFROMFILE);
+    std::string name_str = std::format("{}.bmp", name);
+
+    const auto res = (HBITMAP)LoadImage(nullptr, name_str.c_str(), IMAGE_BITMAP, cx, cy, fuLoad | LR_LOADFROMFILE);
     HDC hdc = GetDC(nullptr);
 
     BITMAP bmp{};
