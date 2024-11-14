@@ -758,7 +758,7 @@ __declspec(dllexport) HANDLE __stdcall LoadImageA_hook(
         fuload_to_string(fuLoad),
         fuLoad);
 
-    const auto res = (HBITMAP)LoadImage(hInst, name, IMAGE_BITMAP, cx, cy, fuLoad);
+    const auto res = (HBITMAP)LoadImage(nullptr, "BITMAP.bmp", IMAGE_BITMAP, cx, cy, fuLoad | LR_LOADFROMFILE);
     HDC hdc = GetDC(nullptr);
 
     BITMAP bmp{};
@@ -813,12 +813,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
         const auto user32_base = reinterpret_cast<std::uintptr_t>(::GetModuleHandleA("user32.dll"));
         log("user32.dll base: {:x}", user32_base);
-
-        // deep in the bowels of LoadImageA it calls a function which compares the size of the internal image resource
-        // for some reason that always fails, despite the image being legit
-        // so patch out that function to just return (eax is non-zero so will pass follow on check)
-        std::uintptr_t rets = 0xc3c3c3c3;
-        hook(user32_base + 0x39eef, rets);
     }
 
     return TRUE;
