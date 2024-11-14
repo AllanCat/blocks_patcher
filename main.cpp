@@ -99,6 +99,8 @@ std::string fuload_to_string(std::uint32_t fuload)
 // patch out an address with another, useful for IAT hooking but can be abused for other patching needs
 std::uintptr_t hook(std::uintptr_t iat_addr, std::uintptr_t hook_addr)
 {
+    log("hooking address at {:#x} with {:#x}", iat_addr, hook_addr);
+
     // make hook location writable
     ::DWORD old_protect;
     assert(
@@ -635,11 +637,14 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         hook(0x419000, reinterpret_cast<std::uintptr_t>(DirectDrawCreate_hook));
         hook(0x41910C, reinterpret_cast<std::uintptr_t>(LoadImageA_hook));
 
+        const auto user32_base = reinterpret_cast<std::uintptr_t>(::GetModuleHandleA("user32.dll"));
+        log("user32.dll base: {:x}", user32_base);
+
         // deep in the bowels of LoadImageA it calls a function which compares the size of the internal image resource
         // for some reason that always fails, despite the image being legit
         // so patch out that function to just return (eax is non-zero so will pass follow on check)
         std::uintptr_t rets = 0xc3c3c3c3;
-        hook(0x76E29D7F, rets);
+        hook(user32_base + 0x39eef, rets);
     }
 
     return TRUE;
