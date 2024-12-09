@@ -409,10 +409,12 @@ __declspec(dllexport) HRESULT __stdcall Flip_hook(void *that, LPDIRECTDRAWSURFAC
                 pRow[3] = 0;
 
                 // for some reason the bitmap image has magenta instead of a white background - so fix that
+                /*
                 if (pRow[0] == 0xff && pRow[1] == 0 && pRow[2] == 0xff)
                 {
                     pRow[1] = 0xff;
                 }
+                */
             }
         }
 
@@ -464,6 +466,75 @@ __declspec(dllexport) HRESULT __stdcall SetPalette_hook(void *that, LPDIRECTDRAW
         g_surface_hooks["SetPalette"])(that, unnamedParam1);
 
     log("\tSetPalette returned {}", res);
+    return res;
+}
+
+__declspec(dllexport) HRESULT __stdcall GetPixelFormat_hook(void *that, LPDDPIXELFORMAT unnamedParam1)
+{
+    log("GetPixelFormat {} {}", that, reinterpret_cast<void *>(unnamedParam1));
+
+    const auto res = reinterpret_cast<HRESULT(__stdcall *)(void *, LPDDPIXELFORMAT)>(
+        g_surface_hooks["GetPixelFormat"])(that, unnamedParam1);
+
+    log("\tGetPixelFormat returned {}", res);
+    return res;
+}
+
+#define __RGB16BIT555(r, g, b) ((b & 31) + ((g & 31) << 5) + ((r & 31) << 10))
+#define __RGB16BIT565(r, g, b) ((b & 31) + ((g & 63) << 5) + ((r & 31) << 11))
+#define __RGB24BIT(r, g, b) (b + (g << 8) + (r << 16))
+#define __RGB32BIT(a, r, g, b) (b + (g << 8) + (r << 16) + (a << 24))
+
+__declspec(dllexport) HRESULT __stdcall SetColorKey_hook(void *that, DWORD unnamedParam1, LPDDCOLORKEY unnamedParam2)
+{
+    log("SetColorKey {} {} {}", that, unnamedParam1, reinterpret_cast<void *>(unnamedParam2));
+
+    DDPIXELFORMAT pixelFormat{};
+    pixelFormat.dwSize = sizeof(pixelFormat);
+    GetPixelFormat_hook(that, &pixelFormat);
+
+    DDCOLORKEY colorKey;
+
+    if (pixelFormat.dwFlags & DDPF_RGB)
+    {
+        switch (pixelFormat.dwRGBBitCount)
+        {
+            case 15: // RGB 555
+            {
+                colorKey.dwColorSpaceHighValue = __RGB16BIT555(255, 0, 255);
+                colorKey.dwColorSpaceLowValue = __RGB16BIT555(255, 0, 255);
+                break;
+            }
+            case 16: // RGB 565
+            {
+                colorKey.dwColorSpaceHighValue = __RGB16BIT565(255, 0, 255);
+                colorKey.dwColorSpaceLowValue = __RGB16BIT565(255, 0, 255);
+                break;
+            }
+            case 24: // RGB 888
+            {
+                colorKey.dwColorSpaceHighValue = __RGB24BIT(255, 0, 255);
+                colorKey.dwColorSpaceLowValue = __RGB24BIT(255, 0, 255);
+                break;
+            }
+            case 32: // ARGB 8888
+            {
+                colorKey.dwColorSpaceHighValue = __RGB32BIT(0, 255, 0, 255);
+                colorKey.dwColorSpaceLowValue = __RGB32BIT(0, 255, 0, 255);
+                break;
+            }
+        }
+    }
+    else
+    {
+        colorKey.dwColorSpaceHighValue = unnamedParam2->dwColorSpaceHighValue;
+        colorKey.dwColorSpaceLowValue = unnamedParam2->dwColorSpaceLowValue;
+    }
+
+    const auto res = reinterpret_cast<HRESULT(__stdcall *)(void *, DWORD, LPDDCOLORKEY)>(
+        g_surface_hooks["SetColorKey"])(that, DDCKEY_SRCBLT, &colorKey);
+
+    log("\tSetColorKey returned {}", res);
     return res;
 }
 
@@ -567,6 +638,16 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
             reinterpret_cast<std::uintptr_t>(SetPalette_hook));
         g_surface_hooks["SetPalette"] = original_set_palette;
 
+        const auto original_set_color_key = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_primary_surface)) + 0x74,
+            reinterpret_cast<std::uintptr_t>(SetColorKey_hook));
+        g_surface_hooks["SetColorKey"] = original_set_color_key;
+
+        const auto original_get_pixel_format = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_primary_surface)) + 0x54,
+            reinterpret_cast<std::uintptr_t>(GetPixelFormat_hook));
+        g_surface_hooks["GetPixelFormat"] = original_get_pixel_format;
+
         log("PRIMARY SURFACE {}", reinterpret_cast<void *>(g_primary_surface));
 
         // also create a back buffer for double buffering
@@ -623,6 +704,14 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
             const auto original_set_palette = hook(
                 reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x7c,
                 reinterpret_cast<std::uintptr_t>(SetPalette_hook));
+
+            const auto original_set_color_key = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x74,
+                reinterpret_cast<std::uintptr_t>(SetColorKey_hook));
+
+            const auto original_get_pixel_format = hook(
+                reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_back_buffer_surface)) + 0x54,
+                reinterpret_cast<std::uintptr_t>(GetPixelFormat_hook));
 
             log("BACK BUFFER SURFACE {}", reinterpret_cast<void *>(g_back_buffer_surface));
         }
