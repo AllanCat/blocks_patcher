@@ -777,6 +777,14 @@ __declspec(dllexport) HRESULT __stdcall CreateSurface_hook(
             reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x7c,
             reinterpret_cast<std::uintptr_t>(SetPalette_hook));
 
+        const auto original_set_color_key = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x74,
+            reinterpret_cast<std::uintptr_t>(SetColorKey_hook));
+
+        const auto original_get_pixel_format = hook(
+            reinterpret_cast<std::uintptr_t>(*reinterpret_cast<void **>(g_image_surface)) + 0x54,
+            reinterpret_cast<std::uintptr_t>(GetPixelFormat_hook));
+
         log("IMAGE SURFACE {}", reinterpret_cast<void *>(g_image_surface));
 
         return res;
